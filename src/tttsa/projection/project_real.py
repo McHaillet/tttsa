@@ -49,6 +49,7 @@ def common_lines_projection(
         images,
         M,
     )
+
     projections = rotated.mean(axis=-1).squeeze()
     return projections
 

@@ -8,10 +8,11 @@ from rich.console import Console
 from rich.progress import track
 from torch_fourier_shift import fourier_shift_image_2d
 
+from .back_projection import filtered_back_projection_3d
 from .coarse_align import coarse_align, stretch_align
 from .optimizers import optimize_tilt_angle_offset, optimize_tilt_axis_angle
 from .projection_matching import projection_matching
-from .utils import circle
+from .utils import circle, fit_ice_slab_to_tomo
 
 # update shift
 PMDL.SHIFT = [PMDL.SHIFT_Y, PMDL.SHIFT_X]
@@ -95,6 +96,16 @@ def tilt_series_alignment(
         f"{projection_model[PMDL.ROTATION_Z].mean():.2f}° +-"
         f" {projection_model[PMDL.ROTATION_Z].std():.2f}°"
     )
+
+    ry, rx, alignment_z_height, z_offset = fit_ice_slab_to_tomo(
+        filtered_back_projection_3d(tilt_series, tomogram_dimensions, projection_model)
+        .cpu()
+        .numpy()
+    )
+    print(ry, rx, alignment_z_height, z_offset)
+    projection_model[PMDL.ROTATION_Y] += ry
+    projection_model[PMDL.ROTATION_X] += rx
+    tomogram_dimensions = (alignment_z_height, size, size)
 
     if find_tilt_angle_offset:
         full_offset = torch.tensor(0.0)

@@ -4,10 +4,109 @@ from functools import lru_cache
 from typing import Sequence, Tuple
 
 import einops
+import numpy as np
 import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 from torch_grid_utils import coordinate_grid
+
+
+def fit_ice_slab_to_tomo(tomogram: np.ndarray) -> Tuple[float, float, int, int]:
+    """Fit an ice slab to a tomogram to find rotations, z-offset and thickness."""
+    from slabify.utils import (
+        sample_points,
+        variance_at_points,
+    )
+
+    N = 10000
+    dims = tomogram.shape
+    boxsize = 16
+    z_min = 1
+    z_max = None
+    seed = 42
+    percentile = 95
+
+    Z_rand, Y_rand, X_rand = sample_points(
+        mask_size=dims, N=N, boxsize=boxsize, z_min=z_min, z_max=z_max, seed=seed
+    )
+    # Calculate the variance around each point:
+    variances = variance_at_points(
+        tomo=tomogram, Z=Z_rand, Y=Y_rand, X=X_rand, N=N, boxsize=boxsize
+    )
+
+    variance_threshold = np.percentile(variances, percentile)
+    idx = variances[:] > variance_threshold
+    idx = idx.squeeze()
+    # variances = variances[idx]
+    Z_rand, Y_rand, X_rand = Z_rand[idx], Y_rand[idx], X_rand[idx]
+
+    points = np.array((Z_rand, Y_rand, X_rand))
+    centroid = np.mean(points, axis=1, keepdims=True)
+    points_centered = points - centroid
+    U, _, _ = np.linalg.svd(points_centered)
+    normal_vector = U[:, -1]
+    z_ref = np.array([1, 0, 0])
+    n = normal_vector / np.linalg.norm(normal_vector)  # order is zyx
+    n = (
+        -n
+        if np.sqrt(np.sum((z_ref - -n) ** 2)) < np.sqrt(np.sum((z_ref - n) ** 2))
+        else n
+    )
+
+    # Step 1: Compute the rotation angle around the y-axis (align projections in the
+    # yz-plane
+    theta_y = np.arctan2(n[2], n[0])  # atan2(n_x, n_z)
+
+    # Step 2: Compute the rotation angle around the x-axis (align z-components)
+    theta_x = -np.arctan2(
+        n[1], np.sqrt(n[2] ** 2 + n[0] ** 2)
+    )  # atan2(n_y, sqrt(n_x^2 + n_z^2))
+
+    # Step 3: Rotation matrix around the y-axis (for aligning projections in the
+    # yz-plane
+    Ry = np.flip(
+        np.array(
+            [
+                [np.cos(theta_y), 0, np.sin(theta_y)],
+                [0, 1, 0],
+                [-np.sin(theta_y), 0, np.cos(theta_y)],
+            ]
+        )
+    )
+
+    # Step 4: Rotation matrix around the x-axis (for aligning z-components)
+    Rx = np.flip(
+        np.array(
+            [
+                [1, 0, 0],
+                [0, np.cos(theta_x), -np.sin(theta_x)],
+                [0, np.sin(theta_x), np.cos(theta_x)],
+            ]
+        )
+    )
+
+    # Combined rotation matrix (first around y, then around x)
+    R = np.dot(Ry, Rx)
+
+    flattened_points = np.linalg.inv(R) @ points_centered + centroid
+
+    # calculate top bottom and offset
+    z_coords = flattened_points[0]
+    upper_quartile = np.percentile(z_coords, 75)
+    lower_quartile = np.percentile(z_coords, 25)
+    iqr = upper_quartile - lower_quartile
+    upper_whisker = z_coords[z_coords <= upper_quartile + 1.5 * iqr].max()
+    lower_whisker = z_coords[z_coords >= lower_quartile - 1.5 * iqr].min()
+
+    z_height = upper_whisker - lower_whisker
+    center = lower_whisker + z_height / 2
+    z_offset = center - tomogram.shape[0] // 2
+    return (
+        float(np.rad2deg(theta_y)),
+        float(np.rad2deg(theta_x)),
+        int(z_height),
+        int(z_offset),
+    )
 
 
 @lru_cache(maxsize=1)

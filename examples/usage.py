@@ -33,7 +33,7 @@ IMAGE_PIXEL_SIZE = 1.724
 # this angle is assumed to be a clockwise forward rotation after projecting the sample
 TILT_AXIS_ANGLE_PRIOR = -88.7
 ALIGNMENT_PIXEL_SIZE = IMAGE_PIXEL_SIZE * 10
-ALIGN_Z = int(1600 / ALIGNMENT_PIXEL_SIZE)  # number is in A
+ALIGN_Z = int(2400 / ALIGNMENT_PIXEL_SIZE)  # number is in A
 RECON_Z = int(2400 / ALIGNMENT_PIXEL_SIZE)
 WEIGHTING = "hamming"  # weighting scheme for filtered back projection
 # the object diameter in number of pixels
@@ -85,7 +85,7 @@ projection_model_optimized = tilt_series_alignment(
     tilt_series.to(DEVICE),
     projection_model_prior,
     ALIGN_Z,
-    find_tilt_angle_offset=True,
+    find_tilt_angle_offset=False,
 )
 
 tomogram = Tomogram(

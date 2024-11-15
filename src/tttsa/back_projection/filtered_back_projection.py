@@ -23,7 +23,7 @@ def filtered_back_projection_3d(
     tilt_series: torch.Tensor,
     tomogram_dimensions: Tuple[int, int, int],
     projection_model: ProjectionModel,
-    weighting: str = "exact",
+    weighting: str = "hamming",
     object_diameter: float | None = None,
 ) -> torch.Tensor:
     """Run weighted back projection incorporating some alignment parameters.
@@ -145,13 +145,11 @@ def filtered_back_projection_3d(
         grid_t = einops.rearrange(grid_t, "... d h w coords 1 -> ... d h w coords")[
             ..., :3
         ].contiguous()
-        grid_sample_coordinates = array_to_grid_sample(grid_t, tomogram_dimensions)
+        grid_t = array_to_grid_sample(grid_t, tomogram_dimensions)
         reconstruction += torch.squeeze(
             F.grid_sample(
                 einops.rearrange(weighted[i], "h w -> 1 1 1 h w"),
-                einops.rearrange(
-                    grid_sample_coordinates, "d h w coords -> 1 d h w coords"
-                ),
+                einops.rearrange(grid_t, "d h w coords -> 1 d h w coords"),
                 align_corners=True,
                 mode="bilinear",
             )

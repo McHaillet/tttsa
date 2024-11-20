@@ -132,7 +132,7 @@ def tilt_series_alignment(
 
     # some optimizations parameters
     max_iter = 10  # this seems solid
-    tolerance = 0.1  # should probably be related to pixel size
+    tolerance = 0.01  # should probably be related to pixel size
     prev_shifts = projection_model[PMDL.SHIFT].to_numpy()
     console.print(
         f"=== Starting projection matching with"
@@ -158,7 +158,7 @@ def tilt_series_alignment(
             .numpy()
         )
 
-        projection_model, _ = projection_matching(
+        projection_model, projs = projection_matching(
             tilt_series,
             projection_model,
             reference_tilt,

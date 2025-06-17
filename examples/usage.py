@@ -32,7 +32,7 @@ with open(Path(GOODBOY.fetch("tomo200528_107.rawtlt"))) as f:
 IMAGE_PIXEL_SIZE = 1.724
 # this angle is assumed to be a clockwise forward rotation after projecting the sample
 TILT_AXIS_ANGLE_PRIOR = -88.7
-ALIGNMENT_PIXEL_SIZE = IMAGE_PIXEL_SIZE * 10
+ALIGNMENT_PIXEL_SIZE = IMAGE_PIXEL_SIZE * 8
 ALIGN_Z = int(1600 / ALIGNMENT_PIXEL_SIZE)  # number is in A
 RECON_Z = int(2400 / ALIGNMENT_PIXEL_SIZE)
 WEIGHTING = "hamming"  # weighting scheme for filtered back projection

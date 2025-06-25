@@ -1,23 +1,25 @@
 """DFT based cross-correlation between images."""
 
-import einops
 import torch
+import torch.nn.functional as F
 
 
 def correlate_2d(
-    a: torch.Tensor, b: torch.Tensor, normalize: bool = False
+    a: torch.Tensor,
+    b: torch.Tensor,
 ) -> torch.Tensor:
     """Calculate the 2D cross correlation between images of the same size.
 
     The position of the maximum relative to the center of the image gives a shift.
     This is the shift that when applied to `b` best aligns it to `a`.
     """
-    if normalize is True:
-        h, w = a.shape[-2:]
-        a_norm = einops.reduce(a**2, "... h w -> ... 1 1", reduction="mean") ** 0.5
-        b_norm = einops.reduce(b**2, "... h w -> ... 1 1", reduction="mean") ** 0.5
-        a = a / a_norm
-        b = b / b_norm
+    # then pad with 2x
+    p = int(0.5 * min(a.shape[-2:]))
+    a = F.pad(a, [p] * 4, value=0)
+    b = F.pad(b, [p] * 4, value=0)
+
+    # do the correlation
+    h, w = a.shape[-2:]
     fta = torch.fft.rfftn(a, dim=(-2, -1))
     ftb = torch.fft.rfftn(b, dim=(-2, -1))
     result = fta * torch.conj(ftb)
@@ -26,6 +28,9 @@ def correlate_2d(
     # result = bfactor_dft(result, 300, (result.shape[-2], ) * 2, 1, True)
     result = torch.fft.irfftn(result, dim=(-2, -1), s=a.shape[-2:])
     result = torch.real(torch.fft.ifftshift(result, dim=(-2, -1)))
-    if normalize is True:
-        result = result / (h * w)
+    result = result / (h * w)  # normalize the value range
+
+    # unpad
+    result = F.pad(result, [-p] * 4)
+
     return result

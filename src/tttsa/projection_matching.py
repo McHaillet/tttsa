@@ -1,5 +1,6 @@
 """Run the projection matching algorithm."""
 
+from functools import lru_cache
 from typing import Tuple
 
 import einops
@@ -17,6 +18,15 @@ from .utils import array_to_grid_sample, homogenise_coordinates
 
 # update shift
 PMDL.SHIFT = [PMDL.SHIFT_Y, PMDL.SHIFT_X]
+
+
+@lru_cache(maxsize=2)
+def projection_grid_cached(slice_dims: tuple, device: str) -> torch.Tensor:
+    """Cached function to generate and quickly reload grids."""
+    proj_grid = coordinate_grid(slice_dims, device=device)
+    proj_grid = homogenise_coordinates(proj_grid)
+    proj_grid = einops.rearrange(proj_grid, "d w coords -> d w coords 1")
+    return proj_grid
 
 
 def get_lerp_corner_weights(
@@ -72,12 +82,14 @@ def back_and_forth(
 
     s0 = T_2d(-center)
     r0 = R_2d(tilt_angles)
+    # now I am pretending that the sample ice layer is orthogonal to the
+    # forward projection view
+    r1 = torch.linalg.inv(R_2d(forward_angle))
     s1 = T_2d(center)
-    M = einops.rearrange(s1 @ r0 @ s0, "... i j -> ... 1 1 i j").to(device)
+    M = einops.rearrange(s1 @ r1 @ r0 @ s0, "... i j -> ... 1 1 i j").to(device)
 
     # create grid for xz-slice reconstruction
-    grid = homogenise_coordinates(coordinate_grid(zx_slice_dims, device=device))
-    grid = einops.rearrange(grid, "d w coords -> d w coords 1")
+    grid = projection_grid_cached(zx_slice_dims, device)
     grid = M @ grid
     grid = einops.rearrange(grid, "... d w coords 1 -> ... d w coords")[
         ..., :2
@@ -86,48 +98,69 @@ def back_and_forth(
 
     # create the grid for projecting the xz-slice forward
     projection = torch.zeros(projection_dims, dtype=torch.float32, device=device)
-    M_proj = (s1 @ R_2d(forward_angle) @ s0)[:, 1:2, :]
-    M_proj = einops.rearrange(M_proj, "... i j -> ... 1 1 i j").to(device)
+    weights = torch.zeros(projection_dims, dtype=torch.int32, device=device)
 
-    proj_grid = homogenise_coordinates(coordinate_grid(zx_slice_dims, device=device))
-    proj_grid = einops.rearrange(proj_grid, "d w coords -> d w coords 1")
+    # calculate valid points in the ice layer for the forward projection
+    M_proj = (s1 @ r1 @ s0)[:, :2, :]
+    M_proj = einops.rearrange(M_proj, "... i j -> ... 1 1 i j").to(device)
+    proj_grid = projection_grid_cached(zx_slice_dims, device)
     proj_grid = M_proj @ proj_grid
     proj_grid = einops.rearrange(proj_grid, "... d w coords 1 -> ... d w coords")
-    corners, weights, valid_ids = get_lerp_corner_weights(proj_grid, w)
+    outside = torch.abs(proj_grid[..., 0] - (align_z // 2)) > (align_z // 2)
+    outside = einops.rearrange(outside, "1 d w -> d w")
 
-    def place_in_image(data: torch.Tensor, image: torch.Tensor) -> None:
-        """Utility function for linear interpolation."""
-        d = data[valid_ids]
-        for x in (0, 1):  # loop over floor and ceil of the coordinates
-            w = weights[:, x]
-            xc = einops.rearrange(
-                corners[
-                    :,
-                    [
-                        x,
-                    ],
-                ],
-                "b x -> x b",
-            )
-            image.index_put_(indices=(xc,), values=w * d, accumulate=True)
+    # corners, weights, valid_ids = get_lerp_corner_weights(proj_grid, w)
+    # def place_in_image(data: torch.Tensor, image: torch.Tensor) -> None:
+    #     """Utility function for linear interpolation."""
+    #     d = data[valid_ids]
+    #     for x in (0, 1):  # loop over floor and ceil of the coordinates
+    #         w = weights[:, x]
+    #         xc = einops.rearrange(
+    #             corners[
+    #                 :,
+    #                 [
+    #                     x,
+    #                 ],
+    #             ],
+    #             "b x -> x b",
+    #         )
+    #         image.index_put_(indices=(xc,), values=w * d, accumulate=True)
 
     for y_slice in range(h):
-        zx_slice = einops.reduce(
-            F.grid_sample(
-                einops.rearrange(tilt_series[:, y_slice], "n w -> n 1 1 w"),
-                grid,
-                align_corners=True,
-                mode="bicubic",
-            ),
-            "n c d w -> d w",
-            "mean",
+        # zx_slice = einops.reduce(
+        #     F.grid_sample(
+        #         einops.rearrange(tilt_series[:, y_slice], "n w -> n 1 1 w"),
+        #         grid,
+        #         align_corners=True,
+        #         mode="bicubic",
+        #     ),
+        #     "n c d w -> d w",
+        #     "mean",
+        # )
+        zx_slice = F.grid_sample(
+            einops.rearrange(tilt_series[:, y_slice], "n w -> n 1 1 w"),
+            grid,
+            align_corners=True,
+            mode="bicubic",
         )
-        place_in_image(
-            zx_slice.view(-1),  # data
-            projection[y_slice],  # image
-        )
+        zx_slice = einops.rearrange(zx_slice, "n 1 d w -> n d w")
+        zx_slice[..., outside] = 0
+        projection[y_slice] = torch.mean(zx_slice, dim=(0, 1))
+        inside = torch.logical_not(outside)
+        weights[y_slice] = torch.sum(inside.to(torch.int16), dim=0)
 
-    return projection
+        # if abs(forward_angle) > 45:
+        #     import napari
+        #     viewer = napari.Viewer()
+        #     viewer.add_image(zx_slice.cpu().numpy())
+        #     napari.run()
+
+        # place_in_image(
+        #     zx_slice.view(-1),  # data
+        #     projection[y_slice],  # image
+        # )
+
+    return projection, weights
 
 
 def predict_projection(
@@ -179,12 +212,13 @@ def predict_projection(
     if len(weighted.shape) == 2:  # rfftn gets rid of batch dimension: add it back
         weighted = einops.rearrange(weighted, "h w -> 1 h w")
 
-    projection = back_and_forth(
+    projection, projection_weights = back_and_forth(
         weighted,
         torch.tensor(projection_model[PMDL.ROTATION_Y].to_numpy()),
         float(forward_projection[PMDL.ROTATION_Y].iloc[0]),
         align_z,
     )
+    projection_weights = projection_weights / projection_weights.max()
 
     # generate the 2d alignment affine matrix
     M = torch.linalg.inv(
@@ -195,12 +229,23 @@ def predict_projection(
         )
     ).to(device)
 
-    aligned_projection = affine_transform_2d(
+    projection = affine_transform_2d(
         projection,
         M,
         out_shape=tilt_image_dimensions,
     )
-    return aligned_projection
+    projection_weights = affine_transform_2d(
+        projection_weights,
+        M,
+        out_shape=tilt_image_dimensions,
+    )
+    # import napari
+    # viewer = napari.Viewer()
+    # viewer.add_image(projection.cpu().numpy())
+    # viewer.add_image(projection_weights.cpu().numpy())
+    # napari.run()
+
+    return projection, projection_weights
 
 
 def projection_matching(
@@ -241,36 +286,28 @@ def projection_matching(
             torch.cos(torch.deg2rad(torch.abs(tilt_angles - tilt_angle))),
             "n -> n 1 1",
         ).to(device)
-        projection = predict_projection(
+        projection, weights = predict_projection(
             tilt_series[aligned_set,] * weights[aligned_set,],
             projection_model_out.iloc[aligned_set,],
             projection_model_out.iloc[[i],],
             tomogram_dimensions[0],  # only align z
         )
-        # intermediate_recon = filtered_back_projection_3d(
-        #     tilt_series[aligned_set,] * weights[aligned_set,],
-        #     tomogram_dimensions,
-        #     projection_model_out.iloc[aligned_set,],
-        #     weighting=reconstruction_weighting,
-        #     object_diameter=exact_weighting_object_diameter,
-        # )
-        # projection, projection_weights = tomogram_reprojection(
-        #     intermediate_recon,
-        #     (size, size),
-        #     projection_model_out.iloc[[i],],
-        # )
 
         # ensure correlation in relevant area
-        # projection_weights = projection_weights / projection_weights.max()
-        projection_weights = alignment_mask
-        projection *= projection_weights
-        projection = (projection - projection.mean()) / projection.std()
-        raw = tilt_series[i] * projection_weights
-        raw = (raw - raw.mean()) / raw.std()
+        projection_weights = alignment_mask  # * weights
+        projection = _normalise_and_mask(projection, projection_weights)
+        raw = _normalise_and_mask(tilt_series[i], projection_weights)
+        # import napari
+        # viewer = napari.Viewer()
+        # viewer.add_image(projection_weights.cpu().numpy())
+        # viewer.add_image(projection.cpu().numpy())
+        # viewer.add_image(raw.cpu().numpy())
+        # napari.run()
         shift = find_image_shift(
             raw,
             projection,
         )
+        print(shift)
         projection_model_out.loc[i, PMDL.SHIFT] = (
             projection_model_out.loc[i, PMDL.SHIFT] + shift.numpy()
         ).astype("float32")
@@ -280,3 +317,11 @@ def projection_matching(
         projections[i] = projection.detach().cpu()
 
     return projection_model_out, projections
+
+
+def _normalise_and_mask(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    n = torch.sum(mask)
+    mean = torch.sum(image * mask) / n
+    std = (torch.sum(image**2 * mask) / n - mean**2) ** 0.5
+    normalised_image = ((image - mean) / std) * mask
+    return normalised_image

@@ -33,7 +33,7 @@ def find_image_shift(
     center = dft_center(image_a.shape, rfft=False, fftshifted=True)
 
     # calculate initial shift with integer precision
-    correlation = correlate_2d(image_a, image_b, normalize=True)
+    correlation = correlate_2d(image_a, image_b)
     maximum_idx = torch.unravel_index(correlation.argmax().cpu(), shape=image_a.shape)
     y, x = maximum_idx
     # Ensure that the max index is not on the border

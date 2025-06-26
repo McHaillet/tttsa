@@ -94,6 +94,8 @@ tomogram = Tomogram(
     sample_translations=projection_model_optimized[PMDL.SHIFT].to_numpy(),
     images=tilt_series.to("cpu"),
 )
+# let's make the reconstruction a bit more beautiful ;)
+tomogram._pad_factor = 3.0
 final = tomogram.reconstruct_tomogram((RECON_Z, size, size), 128)
 
 OUTPUT_DIR.mkdir(exist_ok=True)
